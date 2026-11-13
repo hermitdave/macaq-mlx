@@ -22,6 +22,38 @@ LFM3-1.7B, WikiText-2 test, 130,816 tokens, seq len 512:
 Closes ~67% of the BF16→mxfp4 gap, and beats affine-4 at a lower bit width
 (4.25 vs 4.50 bpw).
 
+## Performance
+
+M3 Max (64 GB unified memory), natural WikiText-2 prose prompts, 256 generated
+tokens.
+
+### Local (`mlx-lm`)
+
+| Context | Model | Prompt TPS | Decode TPS | Peak memory |
+| :--- | :--- | ---: | ---: | ---: |
+| ~1K | BF16 | 2075 | 71.5 | 4.34 GB |
+| ~1K | mxfp4 + refinement | 2623 | **150.9** | **2.22 GB** |
+| ~8K | BF16 | 2903 | 70.3 | 4.95 GB |
+| ~8K | mxfp4 + refinement | 2920 | **141.3** | **2.53 GB** |
+
+### Served (oMLX)
+
+Decode throughput read from the oMLX server log, 3 runs per cell:
+
+| Context | BF16 | mxfp4 + refinement | Speedup |
+| :--- | ---: | ---: | ---: |
+| ~1K | 75.5 tok/s | 171.2 tok/s | **2.3×** |
+| ~8K | 78.0 tok/s | 203.8 tok/s | **2.6×** |
+
+Decode is 2.1–2.6× faster than BF16 and peak memory is roughly halved, because
+weights are read at 4 bits instead of 16. Prefill is bandwidth-saturated at
+these lengths, so prompt throughput is comparable.
+
+The refined checkpoint was also loaded and validated as a served model in oMLX
+(symlinked into `~/llm-models/`, settings `trust_remote_code: false`,
+`mtp_enabled: false`). It is discoverable as
+`LFM3-1.7B-MLX-MACaQ-R-4.25bpw` and generates coherent output.
+
 ## Tuning study
 
 All runs: LFM3-1.7B, 200K calibration tokens unless noted, WikiText-2 train.
@@ -122,7 +154,7 @@ These were all discovered empirically and matter for anyone doing MXFP4 work in 
 | `eval_ppl.py` | WikiText-2 perplexity evaluator |
 | `verify_pack.py` | pack/unpack verification against `mx.dequantize` |
 | `poc_single_layer.py` | single-layer MACaQ proof-of-concept |
-| `benchmarks/` | MLX MXFP4 kernel benchmarks |
+| `benchmarks/` | MLX MXFP4 kernel, local TPS, and oMLX served TPS benchmarks |
 | `sweeps/` | tuning sweep drivers, raw logs, and `results.md` |
 
 ## Attribution

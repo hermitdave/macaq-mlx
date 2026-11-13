@@ -1,0 +1,24 @@
+##### LFM3-1.7B-MLX-BF16 #####
+warming up...
+
+=== context ~1024 tokens (prompt chars 4,096) ===
+  run 1: prompt_tokens=   981 generated= 256  served    75.2 tok/s
+  run 2: prompt_tokens=   981 generated= 256  served    74.9 tok/s
+  run 3: prompt_tokens=   981 generated= 256  served    76.4 tok/s
+
+=== context ~8192 tokens (prompt chars 32,768) ===
+  run 1: prompt_tokens=  7346 generated= 256  served    78.4 tok/s
+  run 2: prompt_tokens=  7346 generated= 226  served    77.6 tok/s
+  run 3: prompt_tokens=  7346 generated= 243  served    77.9 tok/s
+##### LFM3-1.7B-MLX-MACaQ-R-4.25bpw #####
+warming up...
+
+=== context ~1024 tokens (prompt chars 4,096) ===
+  run 1: prompt_tokens=   981 generated= 256  served   167.9 tok/s
+  run 2: prompt_tokens=   981 generated= 256  served   165.3 tok/s
+  run 3: prompt_tokens=   981 generated= 256  served   180.3 tok/s
+
+=== context ~8192 tokens (prompt chars 32,768) ===
+  run 1: prompt_tokens=  7346 generated= 256  served   203.9 tok/s
+  run 2: prompt_tokens=  7346 generated= 256  served   204.2 tok/s
+  run 3: prompt_tokens=  7346 generated= 256  served   203.4 tok/s
