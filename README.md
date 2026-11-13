@@ -4,6 +4,11 @@ A weight-only port of [MACaQ](https://github.com/huawei-csl/MACaQ) (arXiv 2611.1
 to Apple's MLX. It refines the E2M1 codes of an existing MLX `mxfp4` model against a
 BF16 teacher, with **no runtime change, no format change, and no online transforms**.
 
+> **Naming:** artifacts use `MACaQ` (e.g. `LFM3-1.7B-MLX-MACaQ-4.25bpw`), not
+> `MACaQ-R`. The `-R` suffix is unofficial repo-only jargon — the paper never uses
+> it; the technique appears there as Appendix 0.C, "Extending Flip-Refinement to
+> Vector-Quantized Weights".
+
 The output is a standard MLX quantized model: same file layout, same
 `{"mode": "mxfp4", "group_size": 32, "bits": 4}` config, loads with stock
 `mlx_lm.generate`.
