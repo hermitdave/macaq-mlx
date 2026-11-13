@@ -10,7 +10,7 @@ warming up...
   run 1: prompt_tokens=  7346 generated= 256  served    78.4 tok/s
   run 2: prompt_tokens=  7346 generated= 226  served    77.6 tok/s
   run 3: prompt_tokens=  7346 generated= 243  served    77.9 tok/s
-##### LFM3-1.7B-MLX-MACaQ-R-4.25bpw #####
+##### LFM3-1.7B-MLX-MACaQ-4.25bpw #####
 warming up...
 
 === context ~1024 tokens (prompt chars 4,096) ===

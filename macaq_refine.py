@@ -1,4 +1,4 @@
-"""MACaQ-R for MLX: refine native mxfp4 codes against a BF16 teacher.
+"""MACaQ for MLX: refine native mxfp4 codes against a BF16 teacher.
 
 No runtime change, no format change, no online transforms. For every quantized
 linear layer we:

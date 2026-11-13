@@ -1,4 +1,4 @@
-# MACaQ-R for MLX
+# MACaQ for MLX
 
 A weight-only port of [MACaQ](https://github.com/huawei-csl/MACaQ) (arXiv 2611.10649)
 to Apple's MLX. It refines the E2M1 codes of an existing MLX `mxfp4` model against a
@@ -55,7 +55,7 @@ resident; treat the absolute figures as indicative and the ratio as the result.
 The refined checkpoint was also loaded and validated as a served model in oMLX
 (symlinked into `~/llm-models/`, settings `trust_remote_code: false`,
 `mtp_enabled: false`). It is discoverable as
-`LFM3-1.7B-MLX-MACaQ-R-4.25bpw` and generates coherent output.
+`LFM3-1.7B-MLX-MACaQ-4.25bpw` and generates coherent output.
 
 ## Tuning study
 
@@ -169,8 +169,8 @@ It builds directly on
 by Lorenz K. Muller, Philippe Bich, Chiara Boretti, Hyun-Min Chang, Jiawei Zhuang,
 and Lukas Cavigelli, whose code is
 [released under Apache-2.0](https://github.com/huawei-csl/MACaQ). The algorithm
-(Flip-Refinement, Hessian-weighted exponent screening) and the MACaQ-R
-weight-only refinement strategy follow their design; the MLX implementation,
+(Flip-Refinement, Hessian-weighted exponent screening) and the
+weight-only code-refinement strategy follow their design; the MLX implementation,
 packing layer, benchmarks, and tuning study here are new.
 
 ## License

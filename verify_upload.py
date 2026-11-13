@@ -3,7 +3,7 @@ import json
 import struct
 import urllib.request
 
-REPO = "hermitdave/LFM3-1.7B-MLX-MACaQ-R-4.25bpw"
+REPO = "hermitdave/LFM3-1.7B-MLX-MACaQ-4.25bpw"
 LOCAL = "/Users/hermit.dave/Projects/ml/models/LFM3-1.7B-MLX-mxfp4-f256/model.safetensors"
 URL = f"https://huggingface.co/{REPO}/resolve/main/model.safetensors"
 
