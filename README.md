@@ -199,8 +199,9 @@ These were all discovered empirically and matter for anyone doing MXFP4 work in 
   bounds it to one layer (~2.4 GB).
 - **MoE Hessians are routing-aware, not teacher-sampled.** Tokens are
   scattered into per-expert slots so each expert's `H` comes only from tokens
-  that actually routed to it — the same quantity MACaQ-R collects with its
-  teacher, obtained here from the model's own forward pass.
+  that actually routed to it — the same quantity the reference implementation
+  collects with a teacher model, obtained here from the model's own forward
+  pass.
 
 ## Files
 
