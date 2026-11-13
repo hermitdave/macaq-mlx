@@ -23,6 +23,7 @@ import mlx.nn as nn
 import numpy as np
 from datasets import load_dataset
 from mlx.utils import tree_flatten
+from mlx_lm.models.switch_layers import QuantizedSwitchLinear
 from mlx_lm.utils import load, load_config, save
 
 BLOCK = 32
@@ -41,10 +42,13 @@ SHIFT_AMT = mx.arange(0, 32, 4, dtype=mx.uint32)
 
 
 def unpack_mxfp4(packed, scales):
-    """MLX packed uint32 + e8m0 scales -> (signed-grid index, per-block log2 scale)."""
-    out_d, pw = packed.shape
+    """MLX packed uint32 + e8m0 scales -> (signed-grid index, per-block log2 scale).
+
+    Accepts (out, in//8) for dense layers and (E, out, in//8) for MoE experts.
+    """
+    *lead, pw = packed.shape
     in_d = pw * 8
-    nib = ((packed[:, :, None] >> SHIFT_AMT[None, None, :]) & 0xF).reshape(out_d, in_d)
+    nib = ((packed[..., None] >> SHIFT_AMT) & 0xF).reshape(*lead, in_d)
     nib = nib.astype(mx.int32)
     sidx = mx.where(nib >= 8, 15 - nib, nib + 7)
     log2s = scales.astype(mx.int32) - 127
@@ -59,8 +63,8 @@ def pack_mxfp4(sidx, log2s):
 
 
 def scale_elem(log2s, in_d):
-    out_d, nblk = log2s.shape
-    return mx.broadcast_to(mx.power(2.0, log2s)[:, :, None], (out_d, nblk, BLOCK)).reshape(out_d, in_d)
+    *lead, nblk = log2s.shape
+    return mx.broadcast_to(mx.power(2.0, log2s)[..., None], (*lead, nblk, BLOCK)).reshape(*lead, in_d)
 
 
 def dequant(sidx, log2s, in_d):
@@ -69,18 +73,23 @@ def dequant(sidx, log2s, in_d):
 
 # ------------------------------------------------------------------ refinement
 def screen_exponents(W, sidx, log2s, Hd, offsets=(-1, 0, 1)):
-    """Per-(row, block) exponent re-selection under the diagonal Hessian metric."""
-    out_d, in_d = W.shape
+    """Per-(row, block) exponent re-selection under the diagonal Hessian metric.
+
+    Accepts (out, in) or (E, out, in) weights with matching (in,) or (E, in)
+    diagonal Hessians.
+    """
+    *lead, out_d, in_d = W.shape
     nblk = in_d // BLOCK
-    Wg = W.reshape(out_d, nblk, BLOCK)
-    Hdb = Hd.reshape(nblk, BLOCK)
+    Wg = W.reshape(*lead, out_d, nblk, BLOCK)
+    Hdb = Hd.reshape(*lead, nblk, BLOCK)
+    Hdb_b = mx.expand_dims(Hdb, axis=-3)
     best_err = None
     best_log2s = None
     best_sidx = None
     for off in offsets:
         e = log2s + off
         sc = mx.power(2.0, e)
-        abs_s = mx.abs(Wg) / sc[:, :, None]
+        abs_s = mx.abs(Wg) / sc[..., None]
         code = mx.where(abs_s > 5.0, 7,
                mx.where(abs_s > 3.5, 6,
                mx.where(abs_s > 2.5, 5,
@@ -90,16 +99,16 @@ def screen_exponents(W, sidx, log2s, Hd, offsets=(-1, 0, 1)):
                mx.where(abs_s > 0.25, 1, 0.0))))))).astype(mx.int32)
         neg = Wg < 0
         s = mx.where(code == 0, 7, mx.where(neg, 7 - code, 7 + code))
-        deq = mx.take(SG, s) * sc[:, :, None]
-        err = mx.sum(Hdb[None] * (Wg - deq) ** 2, axis=-1)
+        deq = mx.take(SG, s) * sc[..., None]
+        err = mx.sum(Hdb_b * (Wg - deq) ** 2, axis=-1)
         if best_err is None:
             best_err, best_log2s, best_sidx = err, e, s
         else:
             better = err < best_err
             best_err = mx.where(better, err, best_err)
             best_log2s = mx.where(better, e, best_log2s)
-            best_sidx = mx.where(better[:, :, None], s, best_sidx)
-    return best_sidx.reshape(out_d, in_d), best_log2s
+            best_sidx = mx.where(better[..., None], s, best_sidx)
+    return best_sidx.reshape(*lead, out_d, in_d), best_log2s
 
 
 def flip_refine(sidx, log2s, W, Hf, n_iters):
@@ -149,7 +158,7 @@ def flip_refine(sidx, log2s, W, Hf, n_iters):
 
 
 def hessian_objective(W, sidx, log2s, H):
-    R = W - dequant(sidx, log2s, W.shape[1])
+    R = W - dequant(sidx, log2s, W.shape[-1])
     return float(mx.sum(R * (R @ H)))
 
 
@@ -167,6 +176,150 @@ class Catcher(nn.Module):
         h = xf.T @ xf
         self.H = h if self.H is None else self.H + h
         return self.module(x, *args, **kwargs)
+
+
+# ------------------------------------------------------------------ MoE
+class SwitchCatcher(nn.Module):
+    """Per-expert Hessian catcher for SwitchLinear / QuantizedSwitchLinear.
+
+    MLX-LM collapses an MoE layer's experts into one stacked
+    (E, out, in) tensor, so a dense-style hook would mix tokens that never
+    visited the same expert. This wrapper instead scatters each token into a
+    per-expert slot and forms H[e] = sum_{tokens routed to e} x x^T.
+
+    Tokens are sorted by expert, so each expert's rows are contiguous; the
+    scatter uses a lazily-sized padding buffer, so no host sync is needed.
+    """
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+        self.H = None
+
+    def __call__(self, x, indices, sorted_indices=False):
+        in_d = x.shape[-1]
+        E = self.module.num_experts
+        xf = x.reshape(-1, in_d)
+        idx = indices.reshape(-1)
+        if xf.shape[0] != idx.shape[0]:
+            # x carries one row per token while indices carry k per token
+            k = idx.shape[0] // xf.shape[0]
+            xf = mx.take(xf, mx.arange(idx.shape[0]) // k, axis=0)
+        order = mx.argsort(idx)
+        idx_s = idx[order]
+        xf_s = xf[order]
+        counts = mx.sum((idx_s[None, :] == mx.arange(E)[:, None]).astype(mx.int32), axis=1)
+        offsets = mx.cumsum(counts) - counts
+        rank = mx.arange(xf_s.shape[0]) - mx.take(offsets, idx_s)
+        n_max = mx.max(counts)
+        Xp = mx.zeros((E, n_max, in_d))
+        Xp = Xp.at[idx_s, rank].add(xf_s)
+        h = Xp.transpose(0, 2, 1) @ Xp
+        self.H = h if self.H is None else self.H + h
+        return self.module(x, indices, sorted_indices=sorted_indices)
+
+
+def bf16_switch_weight(mod, E, out_d, in_d):
+    """Pull the (E, out, in) BF16 weight out of a SwitchLinear.
+
+    MLX-LM's SwitchLinear stores the stacked expert weight directly; older
+    builds exposed per-projection nn.Linear children instead, so accept both.
+    """
+    w = getattr(mod, "weight", None)
+    if w is not None and tuple(w.shape) == (E, out_d, in_d):
+        return w
+    for attr in ("gate_proj", "up_proj", "down_proj"):
+        sub = getattr(mod, attr, None)
+        cw = getattr(sub, "weight", None)
+        if cw is not None and cw.ndim == 2 and cw.shape[0] == E * out_d and cw.shape[1] == in_d:
+            return cw.reshape(E, out_d, in_d)
+    raise RuntimeError(
+        f"could not locate a ({E}, {out_d}, {in_d}) weight inside {type(mod).__name__}"
+    )
+
+
+def flip_refine_b(sidx, log2s, W, Hf, n_iters):
+    """Batched Flip-Refinement over experts.
+
+    sidx/log2s/W are (E, out, in) and Hf is (E, in, in); each expert is
+    refined independently but the sweeps run as one batched graph.
+    """
+    E, out_d, in_d = sidx.shape
+    Hd = mx.diagonal(Hf, axis1=1, axis2=2)          # (E, in)
+    Hd_b = Hd[:, None, :]                            # (E, 1, in)
+    se = scale_elem(log2s, in_d)                      # (E, out, in)
+    What = mx.take(SG, sidx) * se
+    XTyfp = Hf @ W.transpose(0, 2, 1)                 # (E, in, out)
+    XTyq = Hf @ What.transpose(0, 2, 1)               # (E, in, out)
+    sidx2d = sidx.reshape(E * out_d, in_d)
+    rows = mx.arange(E * out_d)
+
+    @mx.compile
+    def sweep(sidx2d, XTyq, se, Hd_b, Hf, XTyfp):
+        sidx_b = sidx2d.reshape(E, out_d, in_d)
+        g = (XTyfp - XTyq).transpose(0, 2, 1)         # (E, out, in)
+        up_ok = sidx_b < 14
+        c_up = (mx.take(SG, mx.where(up_ok, sidx_b + 1, sidx_b)) - mx.take(SG, sidx_b)) * se
+        dl_up = mx.where(up_ok, c_up * c_up * Hd_b - 2 * c_up * g, INF)
+        dn_ok = sidx_b > 0
+        c_dn = (mx.take(SG, mx.where(dn_ok, sidx_b - 1, sidx_b)) - mx.take(SG, sidx_b)) * se
+        dl_dn = mx.where(dn_ok, c_dn * c_dn * Hd_b - 2 * c_dn * g, INF)
+        up_better = dl_up <= dl_dn
+        dl = mx.where(up_better, dl_up, dl_dn)
+        best_dL = mx.min(dl, axis=-1)
+        best_j = mx.argmin(dl, axis=-1).astype(mx.int32)
+        improving = best_dL < -1e-12
+        ub = mx.take_along_axis(up_better, best_j[:, :, None], axis=-1)[:, :, 0]
+        c_sel = mx.where(ub,
+                         mx.take_along_axis(c_up, best_j[:, :, None], axis=-1)[:, :, 0],
+                         mx.take_along_axis(c_dn, best_j[:, :, None], axis=-1)[:, :, 0])
+        c_sel = mx.where(improving, c_sel, 0.0)
+        delta = mx.where(ub, 1, -1).astype(mx.int32) * improving.astype(mx.int32)
+        sidx2d = sidx2d.at[rows, best_j.reshape(-1)].add(delta.reshape(-1))
+        Hf_cols = mx.take_along_axis(
+            Hf, mx.broadcast_to(best_j[:, None, :], (E, in_d, out_d)), axis=2)
+        XTyq = XTyq + Hf_cols * c_sel[:, None, :]
+        return sidx2d, XTyq, mx.sum(improving.astype(mx.int32))
+
+    sweeps = 0
+    for _ in range(n_iters):
+        sidx2d, XTyq, n_imp = sweep(sidx2d, XTyq, se, Hd_b, Hf, XTyfp)
+        sweeps += 1
+        if int(n_imp) == 0:
+            break
+    return sidx2d.reshape(E, out_d, in_d), sweeps
+
+
+def refine_switch_linear(q_mod, w_bf, H, ridge, n_flips, screen_offsets, chunk):
+    """Screen + Flip-Refine every expert of one QuantizedSwitchLinear."""
+    E, out_d, pw = q_mod.weight.shape
+    in_d = pw * 8
+    sidx, log2s = unpack_mxfp4(q_mod.weight, q_mod.scales)
+    mx.eval(sidx, log2s)
+    before = hessian_objective(w_bf, sidx, log2s, H)
+
+    sidx_parts, log2s_parts, sweeps_max = [], [], 0
+    for e0 in range(0, E, chunk):
+        e1 = min(e0 + chunk, E)
+        Hc = H[e0:e1]
+        Hd = mx.diagonal(Hc, axis1=1, axis2=2)                     # (C, in)
+        ridge_c = ridge * mx.mean(Hd, axis=1)[:, None, None]
+        Hf = Hc + ridge_c * mx.eye(in_d)
+        sidx_c, log2s_c = screen_exponents(
+            w_bf[e0:e1], sidx[e0:e1], log2s[e0:e1], Hd, offsets=screen_offsets)
+        sidx_c, sweeps = flip_refine_b(sidx_c, log2s_c, w_bf[e0:e1], Hf, n_flips)
+        sweeps_max = max(sweeps_max, sweeps)
+        sidx_parts.append(sidx_c)
+        log2s_parts.append(log2s_c)
+
+    sidx = mx.concatenate(sidx_parts, axis=0)
+    log2s = mx.concatenate(log2s_parts, axis=0)
+    after = hessian_objective(w_bf, sidx, log2s, H)
+    packed, scales = pack_mxfp4(sidx, log2s)
+    q_mod.weight = packed
+    q_mod.scales = scales
+    mx.eval(q_mod.weight, q_mod.scales)
+    return before, after, sweeps_max
 
 
 def _step(cur, p):
@@ -228,6 +381,8 @@ def main():
     ap.add_argument("--hessian-cache", default="", help="dir to cache per-layer Hessians")
     ap.add_argument("--screen-offsets", default="-1,0,1",
                     help="comma-separated exponent offsets for the screen")
+    ap.add_argument("--expert-chunk", type=int, default=8,
+                    help="experts refined per graph batch (MoE memory knob)")
     ap.add_argument("--limit-layers", type=int, default=0)
     args = ap.parse_args()
     screen_offsets = tuple(int(x) for x in args.screen_offsets.split(","))
@@ -238,25 +393,28 @@ def main():
     model_bf, _ = load(args.bf16, trust_remote_code=True)
     print(f"loaded models in {time.time()-t0:.1f}s")
 
-    targets = [
+    dense_targets = [
         (k, m) for k, m in tree_flatten(model_q.leaf_modules(), is_leaf=nn.Module.is_module)
         if isinstance(m, nn.QuantizedLinear)
     ]
-    print(f"{len(targets)} quantized linear layers")
-    if not targets:
-        raise RuntimeError(
-            "No nn.QuantizedLinear layers found in --model. MoE models are not "
-            "supported: MLX-LM quantizes experts into QuantizedSwitchLinear "
-            "(one stacked tensor), which this refiner does not handle. Use a "
-            "dense or hybrid model."
-        )
+    moe_targets = [
+        (k, m) for k, m in tree_flatten(model_q.leaf_modules(), is_leaf=nn.Module.is_module)
+        if isinstance(m, QuantizedSwitchLinear)
+    ]
+    print(f"{len(dense_targets)} quantized linear layers, "
+          f"{len(moe_targets)} MoE switch layers")
+    if not dense_targets and not moe_targets:
+        raise RuntimeError("no quantized layers found in --model")
     if args.limit_layers:
-        targets = targets[: args.limit_layers]
+        dense_targets = dense_targets[: args.limit_layers]
+        moe_targets = moe_targets[: args.limit_layers]
 
-    # group by transformer layer
+    # group by transformer layer; each entry is (path, kind)
     groups = {}
-    for k, m in targets:
-        groups.setdefault(layer_index(k), []).append(k)
+    for k, _ in dense_targets:
+        groups.setdefault(layer_index(k), []).append((k, "dense"))
+    for k, _ in moe_targets:
+        groups.setdefault(layer_index(k), []).append((k, "moe"))
     order = sorted(groups)
     print(f"{len(order)} transformer layers, group size {args.group_size}")
 
@@ -285,17 +443,18 @@ def main():
     for gi in range(0, len(order), args.group_size):
         idxs = order[gi : gi + args.group_size]
         paths = [p for i in idxs for p in groups[i]]
-        print(f"\n[groups {idxs}] {len(paths)} layers")
+        n_moe = sum(1 for _, k in paths if k == "moe")
+        print(f"\n[groups {idxs}] {len(paths)} layers ({n_moe} MoE)")
 
-        if cache_root is not None and all(cpath(p).exists() for p in paths):
+        if cache_root is not None and all(cpath(p).exists() for p, _ in paths):
             t1 = time.time()
-            Hs = {p: mx.array(np.load(cpath(p))) for p in paths}
+            Hs = {p: mx.array(np.load(cpath(p))) for p, _ in paths}
             print(f"  hessian load: {time.time()-t1:.1f}s")
         else:
             catchers = []
-            for p in paths:
+            for p, kind in paths:
                 mod = get_module(model_bf, p)
-                c = Catcher(mod)
+                c = Catcher(mod) if kind == "dense" else SwitchCatcher(mod)
                 set_module(model_bf, p, c)
                 catchers.append((p, c, mod))
             t1 = time.time()
@@ -310,42 +469,50 @@ def main():
                     np.save(cpath(p), np.array(c.H))
                 set_module(model_bf, p, orig)
 
-        for p in paths:
+        for p, kind in paths:
             H = Hs.pop(p)
             mx.eval(H)
-            H = H + args.ridge * mx.mean(mx.diagonal(H)) * mx.eye(H.shape[0])
-            W = get_module(model_bf, p).weight.astype(mx.float32)
             q = get_module(model_q, p)
+            if kind == "moe":
+                E, out_d, pw = q.weight.shape
+                in_d = pw * 8
+                W = bf16_switch_weight(get_module(model_bf, p), E, out_d, in_d).astype(mx.float32)
+            else:
+                in_d = q.weight.shape[1] * 8
+                W = get_module(model_bf, p).weight.astype(mx.float32)
             sidx, log2s = unpack_mxfp4(q.weight, q.scales)
             mx.eval(W, sidx, log2s)
 
             # one-time self-check: our unpack must reproduce mx.dequantize
             if n_done == 0:
                 chk = float(mx.max(mx.abs(
-                    dequant(sidx, log2s, W.shape[1])
+                    dequant(sidx, log2s, in_d)
                     - mx.dequantize(q.weight, q.scales, group_size=32, mode="mxfp4").astype(mx.float32))))
                 print(f"  [self-check] unpack vs mx.dequantize max diff = {chk:.3e}")
                 if chk > 1e-6:
                     raise RuntimeError(f"unpack self-check failed for {p}: {chk}")
 
-            before = hessian_objective(W, sidx, log2s, H)
-            sidx, log2s = screen_exponents(W, sidx, log2s, mx.diagonal(H), offsets=screen_offsets)
-            after_screen = hessian_objective(W, sidx, log2s, H)
-            sidx, sweeps = flip_refine(sidx, log2s, W, H, args.flips)
-            after_flip = hessian_objective(W, sidx, log2s, H)
+            if kind == "dense":
+                H = H + args.ridge * mx.mean(mx.diagonal(H)) * mx.eye(H.shape[0])
+                before = hessian_objective(W, sidx, log2s, H)
+                sidx, log2s = screen_exponents(W, sidx, log2s, mx.diagonal(H), offsets=screen_offsets)
+                after_screen = hessian_objective(W, sidx, log2s, H)
+                sidx, sweeps = flip_refine(sidx, log2s, W, H, args.flips)
+                after_flip = hessian_objective(W, sidx, log2s, H)
+                packed, scales = pack_mxfp4(sidx, log2s)
+                q.weight = packed
+                q.scales = scales
+                mx.eval(q.weight, q.scales)
+            else:
+                before, after_flip, sweeps = refine_switch_linear(
+                    q, W, H, args.ridge, args.flips, screen_offsets, args.expert_chunk)
             sweep_stats.append(sweeps)
-
-            packed, scales = pack_mxfp4(sidx, log2s)
-            q.weight = packed
-            q.scales = scales
-            mx.eval(q.weight, q.scales)
 
             total_before += before
             total_after += after_flip
             n_done += 1
             print(f"  {p:52s} {before:.4e} -> {after_flip:.4e} "
-                  f"({100*(1-after_flip/before):5.1f}%)  [screen {100*(1-after_screen/before):4.1f}%]"
-                  f"  sweeps {sweeps}")
+                  f"({100*(1-after_flip/before):5.1f}%)  sweeps {sweeps}")
             del H
 
     print(f"\ntotal Hessian objective: {total_before:.6e} -> {total_after:.6e} "

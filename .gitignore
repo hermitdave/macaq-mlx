@@ -3,3 +3,5 @@ __pycache__/
 .DS_Store
 hess_cache/
 *.npy
+*_convert.log
+olmoe_refine.log

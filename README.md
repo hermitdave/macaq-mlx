@@ -15,7 +15,9 @@ The output is a standard MLX quantized model: same file layout, same
 
 ## Result
 
-LFM3-1.7B, WikiText-2 test, 130,816 tokens, seq len 512:
+### LFM3-1.7B (hybrid attention)
+
+WikiText-2 test, 130,816 tokens, seq len 512:
 
 | Model | Perplexity ↓ | vs BF16 |
 | --- | --- | --- |
@@ -26,6 +28,19 @@ LFM3-1.7B, WikiText-2 test, 130,816 tokens, seq len 512:
 
 Closes ~67% of the BF16→mxfp4 gap, and beats affine-4 at a lower bit width
 (4.25 vs 4.50 bpw).
+
+### OLMoE-1B-7B (MoE, 64 experts, top-8)
+
+Same protocol:
+
+| Model | Perplexity ↓ | vs BF16 |
+| --- | --- | --- |
+| BF16 | 8.4512 ± 0.0610 | — |
+| mxfp4 RTN (MLX default) | 9.5579 ± 0.0699 | +1.107 |
+| **mxfp4 + this refiner** | **8.9950 ± 0.0651** | **+0.544** |
+
+Closes ~51% of the BF16→mxfp4 gap. 129 layers refined (81 dense + 48 MoE
+switch projections), 37.1% Hessian reduction, 34 min wall time.
 
 ## Performance
 
@@ -101,6 +116,20 @@ python macaq_refine.py \
     --hessian-cache hess_cache
 ```
 
+MoE models need a per-layer group and an expert chunk size:
+
+```bash
+python macaq_refine.py \
+    --model     OLMoE-1B-7B-MLX-mxfp4 \
+    --bf16      OLMoE-1B-7B-MLX-BF16 \
+    --output    OLMoE-1B-7B-MLX-MACaQ-4.25bpw \
+    --calib-tokens 200000 --flips 256 --group-size 1 --expert-chunk 8
+```
+
+`--expert-chunk` batches experts through one graph to bound memory during
+refinement (8 experts × 1024 × 2048 is ~600 MB of intermediates). The flip
+budget applies per chunk.
+
 `--hessian-cache` stores per-layer Hessians so hyper-parameter sweeps reuse them
 (the 200K cache is ~8 GB; 1M is ~22 GB).
 
@@ -118,6 +147,16 @@ For each quantized linear layer:
    closed-form gain `2Δg − Δ²H_jj`, exponents held fixed. Early-stops when no row
    has an improving move.
 5. **Repack** into MLX's native layout and write back.
+
+**MoE.** MLX-LM does not quantize experts into individual linears; it collapses
+them into one `QuantizedSwitchLinear` holding a stacked `(E, out, in)` tensor.
+The refiner unpacks that tensor with the same nibble path, captures a separate
+Hessian per expert, and runs the screen and Flip-Refinement with the expert
+axis as a batch dimension. Per-expert Hessians come from a `SwitchCatcher`
+that scatters each token into the slot of the expert it was routed to, so `H`
+reflects the tokens that expert actually sees rather than the layer's whole
+input. The scatter relies on MLX accepting a lazily-evaluated shape in
+`mx.zeros`, which avoids a host sync per batch.
 
 ## Key MLX findings
 
@@ -152,15 +191,16 @@ These were all discovered empirically and matter for anyone doing MXFP4 work in 
   bf16 at batch ≤ 4, and 2.5–3.8× slower at batch ≥ 16.
 - **The layer objective is a proxy.** Lowering ridge inflates the Hessian gain
   without improving perplexity.
-- **Single model validated.** LFM3-1.7B only; no model > 2B.
-- **MoE is not supported.** MLX-LM quantizes MoE experts into a single
-  `QuantizedSwitchLinear` holding a stacked `(num_experts, out, in)` tensor,
-  not individual `nn.QuantizedLinear` modules. The refiner only matches
-  `nn.QuantizedLinear`, so on an MoE model it would skip every expert layer
-  silently. Dense and hybrid architectures work because their linears do
-  quantize to `nn.QuantizedLinear`. Supporting MoE needs a
-  `QuantizedSwitchLinear` unpack/repack path plus per-expert Hessians gathered
-  from routed tokens (as MACaQ-R does with its teacher).
+- **Two models validated.** LFM3-1.7B (hybrid attention) and OLMoE-1B-7B (MoE);
+  no model > 2B.
+- **MoE Hessians need `--group-size 1`.** Per-expert Hessians are
+  `(num_experts, in, in)`; at 64 experts and `in=2048` that is ~1.1 GB per
+  projection, so a multi-layer group can exhaust memory. `--group-size 1`
+  bounds it to one layer (~2.4 GB).
+- **MoE Hessians are routing-aware, not teacher-sampled.** Tokens are
+  scattered into per-expert slots so each expert's `H` comes only from tokens
+  that actually routed to it — the same quantity MACaQ-R collects with its
+  teacher, obtained here from the model's own forward pass.
 
 ## Files
 
