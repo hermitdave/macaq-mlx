@@ -243,6 +243,13 @@ def main():
         if isinstance(m, nn.QuantizedLinear)
     ]
     print(f"{len(targets)} quantized linear layers")
+    if not targets:
+        raise RuntimeError(
+            "No nn.QuantizedLinear layers found in --model. MoE models are not "
+            "supported: MLX-LM quantizes experts into QuantizedSwitchLinear "
+            "(one stacked tensor), which this refiner does not handle. Use a "
+            "dense or hybrid model."
+        )
     if args.limit_layers:
         targets = targets[: args.limit_layers]
 

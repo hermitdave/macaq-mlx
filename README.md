@@ -152,7 +152,15 @@ These were all discovered empirically and matter for anyone doing MXFP4 work in 
   bf16 at batch ≤ 4, and 2.5–3.8× slower at batch ≥ 16.
 - **The layer objective is a proxy.** Lowering ridge inflates the Hessian gain
   without improving perplexity.
-- **Single model validated.** LFM3-1.7B only; no MoE, no model > 2B.
+- **Single model validated.** LFM3-1.7B only; no model > 2B.
+- **MoE is not supported.** MLX-LM quantizes MoE experts into a single
+  `QuantizedSwitchLinear` holding a stacked `(num_experts, out, in)` tensor,
+  not individual `nn.QuantizedLinear` modules. The refiner only matches
+  `nn.QuantizedLinear`, so on an MoE model it would skip every expert layer
+  silently. Dense and hybrid architectures work because their linears do
+  quantize to `nn.QuantizedLinear`. Supporting MoE needs a
+  `QuantizedSwitchLinear` unpack/repack path plus per-expert Hessians gathered
+  from routed tokens (as MACaQ-R does with its teacher).
 
 ## Files
 
