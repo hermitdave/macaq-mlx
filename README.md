@@ -49,6 +49,9 @@ Decode is 2.1–2.6× faster than BF16 and peak memory is roughly halved, becaus
 weights are read at 4 bits instead of 16. Prefill is bandwidth-saturated at
 these lengths, so prompt throughput is comparable.
 
+Served numbers vary by roughly ±10% between sessions depending on what else is
+resident; treat the absolute figures as indicative and the ratio as the result.
+
 The refined checkpoint was also loaded and validated as a served model in oMLX
 (symlinked into `~/llm-models/`, settings `trust_remote_code: false`,
 `mtp_enabled: false`). It is discoverable as
