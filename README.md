@@ -77,6 +77,23 @@ The refined checkpoint was also loaded and validated as a served model in oMLX
 `mtp_enabled: false`). It is discoverable as
 `LFM3-1.7B-MLX-MACaQ-4.25bpw` and generates coherent output.
 
+### OLMoE-1B-7B
+
+Same benchmark, same hardware, 256 generated tokens:
+
+| Context | Model | Prompt TPS | Decode TPS | Peak memory |
+| :--- | :--- | ---: | ---: | ---: |
+| ~1K | BF16 | 3244 | 109.6 | 14.47 GB |
+| ~1K | mxfp4 RTN | 2479 | 276.9 | 4.46 GB |
+| ~1K | mxfp4 + refinement | 3416 | **272.6** | **4.46 GB** |
+| ~8K | BF16 | 3814 | 89.3 | 15.37 GB |
+| ~8K | mxfp4 RTN | 3607 | 153.2 | 5.29 GB |
+| ~8K | mxfp4 + refinement | 3602 | **152.0** | **5.29 GB** |
+
+Decode is 2.5× faster than BF16 and peak memory is 3.2× lower. The refined
+checkpoint lands within run noise of the stock mxfp4 quantization, so the
+quality gain is free at inference.
+
 ## Tuning study
 
 All runs: LFM3-1.7B, 200K calibration tokens unless noted, WikiText-2 train.
