@@ -15,7 +15,7 @@ DATASET = "Salesforce/wikitext"
 CONFIG = "wikitext-2-raw-v1"
 
 
-def get_tokens(tokenizer, split="test", max_tokens=None):
+def get_tokens(tokenizer, split="test", max_tokens=None, bos=False):
     ds = load_dataset(DATASET, CONFIG, split=split)
     texts = [t for t in ds["text"] if t and t.strip()]
     # tokenizers differ on special tokens; encode plain text
@@ -27,10 +27,22 @@ def get_tokens(tokenizer, split="test", max_tokens=None):
     return ids
 
 
-def build_batch(tokens, seq_len, n_samples):
-    n = min(n_samples, len(tokens) // seq_len)
-    ids = tokens[: n * seq_len]
-    return mx.array(ids, mx.uint32).reshape(n, seq_len)
+def build_batch(tokens, seq_len, n_samples, bos_id=None):
+    """Rows of seq_len tokens. With bos_id, each row is [bos] + (seq_len-1)
+    tokens -- LFM2.5 omits <|startoftext|> from encode() and degenerates
+    without it (wikitext PPL ~210 vs ~12 with the BOS leading each row)."""
+    if bos_id is not None:
+        per = seq_len - 1
+        rows = [tokens[i * per:(i + 1) * per] for i in range(n_samples)]
+        rows = [r for r in rows if len(r) == per]
+        ids = [[bos_id] + r for r in rows]
+    else:
+        n = min(n_samples, len(tokens) // seq_len)
+        ids = tokens[: n * seq_len]
+    # `-1`: without BOS `ids` is a flat token list; `len(ids)` would be the token
+    # count, not the row count (Qwen tokenizers have bos_token_id = None, so the
+    # no-BOS branch is the normal path here).
+    return mx.array(ids, mx.uint32).reshape(-1, seq_len)
 
 
 def eval_ppl(model, data, batch_size=8):
@@ -56,15 +68,18 @@ def main():
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--split", default="test")
     ap.add_argument("--max-tokens", type=int, default=0)
+    ap.add_argument("--bos", action="store_true",
+                    help="prepend tokenizer bos_token_id to each row")
     args = ap.parse_args()
 
     mx.set_default_device(mx.gpu)
-    model, tokenizer = load(args.model)
+    model, tokenizer = load(args.model, trust_remote_code=True)
     t0 = time.time()
     tokens = get_tokens(tokenizer, args.split, args.max_tokens or None)
     print(f"tokenized {len(tokens)} tokens in {time.time()-t0:.1f}s")
-    data = build_batch(tokens, args.seq_len, args.samples)
-    print(f"eval set: {data.shape[0]} sequences x {args.seq_len}")
+    bos_id = getattr(tokenizer, "bos_token_id", None) if args.bos else None
+    data = build_batch(tokens, args.seq_len, args.samples, bos_id=bos_id)
+    print(f"eval set: {data.shape[0]} sequences x {args.seq_len} (bos={args.bos})")
 
     t0 = time.time()
     ppl, se, ntok = eval_ppl(model, data, args.batch_size)

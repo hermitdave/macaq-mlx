@@ -157,6 +157,95 @@ def flip_refine(sidx, log2s, W, Hf, n_iters):
     return sidx, sweeps
 
 
+def screen_exponents_mse(W, sidx, log2s, offsets=(-1, 0, 1)):
+    """Per-(row, block) exponent re-selection under plain weight MSE.
+
+    Same structure as ``screen_exponents`` but with the diagonal Hessian
+    replaced by ones -- i.e. minimises ||W - dequant||^2 rather than the
+    activation-weighted output error.
+    """
+    *lead, out_d, in_d = W.shape
+    nblk = in_d // BLOCK
+    Wg = W.reshape(*lead, out_d, nblk, BLOCK)
+    best_err = None
+    best_log2s = None
+    best_sidx = None
+    for off in offsets:
+        e = log2s + off
+        sc = mx.power(2.0, e)
+        abs_s = mx.abs(Wg) / sc[..., None]
+        code = mx.where(abs_s > 5.0, 7,
+               mx.where(abs_s > 3.5, 6,
+               mx.where(abs_s > 2.5, 5,
+               mx.where(abs_s > 1.75, 4,
+               mx.where(abs_s > 1.25, 3,
+               mx.where(abs_s > 0.75, 2,
+               mx.where(abs_s > 0.25, 1, 0.0))))))).astype(mx.int32)
+        neg = Wg < 0
+        s = mx.where(code == 0, 7, mx.where(neg, 7 - code, 7 + code))
+        deq = mx.take(SG, s) * sc[..., None]
+        err = mx.sum((Wg - deq) ** 2, axis=-1)
+        if best_err is None:
+            best_err, best_log2s, best_sidx = err, e, s
+        else:
+            better = err < best_err
+            best_err = mx.where(better, err, best_err)
+            best_log2s = mx.where(better, e, best_log2s)
+            best_sidx = mx.where(better[..., None], s, best_sidx)
+    return best_sidx.reshape(*lead, out_d, in_d), best_log2s
+
+
+def flip_refine_mse(sidx, log2s, W, n_iters):
+    """Greedy coordinate descent on E2M1 codes minimising plain weight MSE.
+
+    Equivalent to ``flip_refine`` with H = I, but without materialising the
+    identity: the gradient is simply ``W - What`` and the rank-1 update
+    touches only the chosen column.
+    """
+    out_d, in_d = sidx.shape
+    se = scale_elem(log2s, in_d)
+    What = mx.take(SG, sidx) * se
+    rows = mx.arange(out_d)
+
+    @mx.compile
+    def sweep(sidx, What):
+        g = W - What
+        up_ok = sidx < 14
+        c_up = (mx.take(SG, mx.where(up_ok, sidx + 1, sidx)) - mx.take(SG, sidx)) * se
+        dl_up = mx.where(up_ok, c_up * c_up - 2 * c_up * g, INF)
+        dn_ok = sidx > 0
+        c_dn = (mx.take(SG, mx.where(dn_ok, sidx - 1, sidx)) - mx.take(SG, sidx)) * se
+        dl_dn = mx.where(dn_ok, c_dn * c_dn - 2 * c_dn * g, INF)
+        up_better = dl_up <= dl_dn
+        dl = mx.where(up_better, dl_up, dl_dn)
+        best_dL = mx.min(dl, axis=1)
+        best_j = mx.argmin(dl, axis=1).astype(mx.int32)
+        improving = best_dL < -1e-12
+        ub = mx.take_along_axis(up_better, best_j[:, None], axis=1)[:, 0]
+        c_sel = mx.where(ub,
+                         mx.take_along_axis(c_up, best_j[:, None], axis=1)[:, 0],
+                         mx.take_along_axis(c_dn, best_j[:, None], axis=1)[:, 0])
+        c_sel = mx.where(improving, c_sel, 0.0)
+        delta = mx.where(ub, 1, -1).astype(mx.int32) * improving.astype(mx.int32)
+        sidx = sidx.at[rows, best_j].add(delta)
+        What = What.at[rows, best_j].add(c_sel)
+        return sidx, What, mx.sum(improving.astype(mx.int32))
+
+    sweeps = 0
+    for _ in range(n_iters):
+        sidx, What, n_imp = sweep(sidx, What)
+        sweeps += 1
+        if int(n_imp) == 0:
+            break
+    return sidx, sweeps
+
+
+def weight_mse(W, sidx, log2s):
+    """Plain per-element weight MSE (the quantity the MSE objective targets)."""
+    R = W - dequant(sidx, log2s, W.shape[-1])
+    return float(mx.mean(R * R))
+
+
 def hessian_objective(W, sidx, log2s, H):
     R = W - dequant(sidx, log2s, W.shape[-1])
     return float(mx.sum(R * (R @ H)))
@@ -384,6 +473,8 @@ def main():
     ap.add_argument("--expert-chunk", type=int, default=8,
                     help="experts refined per graph batch (MoE memory knob)")
     ap.add_argument("--limit-layers", type=int, default=0)
+    ap.add_argument("--objective", choices=["hessian", "mse"], default="hessian",
+                    help="refinement metric: Hessian output error (default) or plain weight MSE")
     args = ap.parse_args()
     screen_offsets = tuple(int(x) for x in args.screen_offsets.split(","))
 
@@ -396,7 +487,19 @@ def main():
     dense_targets = [
         (k, m) for k, m in tree_flatten(model_q.leaf_modules(), is_leaf=nn.Module.is_module)
         if isinstance(m, nn.QuantizedLinear)
+        and getattr(m, "mode", "mxfp4") == "mxfp4"
+        and getattr(m, "group_size", 32) == 32
     ]
+    skipped = [
+        k for k, m in tree_flatten(model_q.leaf_modules(), is_leaf=nn.Module.is_module)
+        if isinstance(m, nn.QuantizedLinear)
+        and not (getattr(m, "mode", "mxfp4") == "mxfp4"
+                 and getattr(m, "group_size", 32) == 32)
+    ]
+    if skipped:
+        print(f"skipping {len(skipped)} non-mxfp4 modules "
+              f"(e.g. {skipped[0]}): mixed-precision base has per-tensor overrides "
+              f"the refiner cannot touch")
     moe_targets = [
         (k, m) for k, m in tree_flatten(model_q.leaf_modules(), is_leaf=nn.Module.is_module)
         if isinstance(m, QuantizedSwitchLinear)
@@ -418,7 +521,8 @@ def main():
     order = sorted(groups)
     print(f"{len(order)} transformer layers, group size {args.group_size}")
 
-    batches = calibration_batches(tokenizer, args.seq_len, args.batch_size, args.calib_tokens)
+    batches = (calibration_batches(tokenizer, args.seq_len, args.batch_size, args.calib_tokens)
+               if args.objective != "mse" else [])
 
     # ---- Hessian cache ----
     cache_root = None
@@ -446,7 +550,9 @@ def main():
         n_moe = sum(1 for _, k in paths if k == "moe")
         print(f"\n[groups {idxs}] {len(paths)} layers ({n_moe} MoE)")
 
-        if cache_root is not None and all(cpath(p).exists() for p, _ in paths):
+        if args.objective == "mse":
+            Hs = {}          # plain-MSE refinement needs no Hessian capture
+        elif cache_root is not None and all(cpath(p).exists() for p, _ in paths):
             t1 = time.time()
             Hs = {p: mx.array(np.load(cpath(p))) for p, _ in paths}
             print(f"  hessian load: {time.time()-t1:.1f}s")
@@ -470,8 +576,9 @@ def main():
                 set_module(model_bf, p, orig)
 
         for p, kind in paths:
-            H = Hs.pop(p)
-            mx.eval(H)
+            H = Hs.pop(p) if Hs else None
+            if H is not None:
+                mx.eval(H)
             q = get_module(model_q, p)
             if kind == "moe":
                 E, out_d, pw = q.weight.shape
@@ -493,12 +600,18 @@ def main():
                     raise RuntimeError(f"unpack self-check failed for {p}: {chk}")
 
             if kind == "dense":
-                H = H + args.ridge * mx.mean(mx.diagonal(H)) * mx.eye(H.shape[0])
-                before = hessian_objective(W, sidx, log2s, H)
-                sidx, log2s = screen_exponents(W, sidx, log2s, mx.diagonal(H), offsets=screen_offsets)
-                after_screen = hessian_objective(W, sidx, log2s, H)
-                sidx, sweeps = flip_refine(sidx, log2s, W, H, args.flips)
-                after_flip = hessian_objective(W, sidx, log2s, H)
+                if args.objective == "mse":
+                    before = weight_mse(W, sidx, log2s)
+                    sidx, log2s = screen_exponents_mse(W, sidx, log2s, offsets=screen_offsets)
+                    sidx, sweeps = flip_refine_mse(sidx, log2s, W, args.flips)
+                    after_flip = weight_mse(W, sidx, log2s)
+                else:
+                    H = H + args.ridge * mx.mean(mx.diagonal(H)) * mx.eye(H.shape[0])
+                    before = hessian_objective(W, sidx, log2s, H)
+                    sidx, log2s = screen_exponents(W, sidx, log2s, mx.diagonal(H), offsets=screen_offsets)
+                    after_screen = hessian_objective(W, sidx, log2s, H)
+                    sidx, sweeps = flip_refine(sidx, log2s, W, H, args.flips)
+                    after_flip = hessian_objective(W, sidx, log2s, H)
                 packed, scales = pack_mxfp4(sidx, log2s)
                 q.weight = packed
                 q.scales = scales
@@ -515,7 +628,8 @@ def main():
                   f"({100*(1-after_flip/before):5.1f}%)  sweeps {sweeps}")
             del H
 
-    print(f"\ntotal Hessian objective: {total_before:.6e} -> {total_after:.6e} "
+    obj_label = "weight MSE" if args.objective == "mse" else "Hessian objective"
+    print(f"\ntotal {obj_label}: {total_before:.6e} -> {total_after:.6e} "
           f"({100*(1-total_after/total_before):.1f}% reduction) over {n_done} layers")
     print(f"flip sweeps: mean {np.mean(sweep_stats):.1f}  max {max(sweep_stats)}  "
           f"(budget {args.flips})")
