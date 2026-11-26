@@ -161,6 +161,14 @@ correct, but its first version is 4–8× slower than Route A + stock GEMM
 (7.8 tok/s end-to-end). It is research-only and not enabled anywhere; the plan
 records what a competitive version would need.
 
+**Current decision:** keep the Hadamard-rotated quant and the `"rotate"` path;
+do not adopt further fused-kernel work for now. The quality benefit comes from
+the rotated quantization (KLD/PPL/top-1), not from the fused activation kernel,
+which is numerically equivalent to the stock transform. The compared decode
+numbers are 50.0 tok/s stock vs 51.2 tok/s fused — within noise — while both
+remain below RCO 4.63 (64.2 tok/s). The published checkpoint keeps
+`fused: "none"`; flip it per-checkpoint only if a measured win appears.
+
 ## Trade-offs
 
 - Quality: rotated codes lower the Hessian-weighted layer error; expect a
