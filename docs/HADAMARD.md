@@ -95,6 +95,27 @@ comparable; the relative gap to BF16 (+1.73% rotated vs +2.62% unrotated) is
 only indicative. The old checkpoint has since been deleted locally, so a
 same-harness rerun would require rebuilding it.
 
+### Head-to-head with RCO 4.63 (same harness)
+
+Re-run with `eval_quality_table.py` protocol (8×256 WikiText rows, BF16 text
+teacher), after downloading `hermitdave/Qwen3.5-9B-MLX-RCO-4.63bpw-mtp4`:
+
+| Model | PPL | dPPL | KL | top-1 |
+|---|---:|---:|---:|---:|
+| BF16 | 10.2617 | — | — | — |
+| **MACaQ Hadamard 4.25** | **10.4865** | **+0.2247** | **0.0284** | **91.37%** |
+| RCO 4.63 (mtp4) | 10.6043 | +0.3426 | 0.0397 | 89.46% |
+
+Historical unrotated MACaQ-Hessian on the same harness: PPL 10.5345,
+KL 0.0388, top-1 88.82%. So rotation moves every metric in the right direction.
+
+Caveat: this is not equal parameter coverage. The rotated checkpoint quantizes
+248 decoder linears to MXFP4 but keeps embeddings, lm_head, norms and vision
+out of scope; the RCO checkpoint quantizes those too (its config has affine
+4-bit `lm_head` and `embed_tokens`). The rotated artifact is also smaller
+(4.25 vs 4.63 bpw overall). Treat this as a deployment-relevant comparison,
+not a controlled study of the two quantizers on identical tensors.
+
 ## Trade-offs
 
 - Quality: rotated codes lower the Hessian-weighted layer error; expect a
