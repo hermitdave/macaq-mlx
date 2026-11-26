@@ -146,6 +146,16 @@ the rotated backbone's hidden states do not match a head trained against a
 different quantization basis. `mtp_enabled` stays false; the grafted checkpoint
 is kept locally as the documented negative result and is unloaded.
 
+### Optional fused activation kernel (Route A)
+
+`macaq_model.py` in this repo now contains a `mx.fast.metal_kernel` that fuses
+`x*t` and the 32-block Hadamard into one launch. It is **opt-in** via
+`config["macaq"]["fused"] = "rotate"` (default `"none"`), with automatic
+fallback to the stock path if compilation fails. It is not enabled on the
+published checkpoint: unit/layer tests pass and PPL is identical (8.7089 on
+32×512), but full-model decode improved only 50.0 → 51.2 tok/s — within noise.
+See `docs/FUSED_KERNEL_PLAN.md` for the cross-session plan and measurements.
+
 ## Trade-offs
 
 - Quality: rotated codes lower the Hessian-weighted layer error; expect a
