@@ -38,6 +38,7 @@ from macaq_refine import (
     set_module,
     unpack_mxfp4,
 )
+from macaq_flip_kernel import flip_refine_metal
 from macaq_model import BLOCK, FORMAT, FORMAT_VERSION, MACaQLinear
 
 
@@ -69,7 +70,7 @@ def channel_scale(W, Hd, n_tokens, alpha, lo=1e-4, hi=1e4):
     return mx.clip(t, lo, hi).astype(mx.bfloat16)
 
 
-def quantize_rotated(W, H, t, flips, ridge, offsets):
+def quantize_rotated(W, H, t, flips, ridge, offsets, flip_impl="mlx"):
     """Return packed MXFP4 codes of (W/t)B and refinement stats."""
     tf = t.astype(mx.float32)
     Wp = rotate_block(W / tf[None, :])
@@ -81,7 +82,8 @@ def quantize_rotated(W, H, t, flips, ridge, offsets):
     before = hessian_objective(Wp, sidx, log2s, Hp)
     sidx, log2s = screen_exponents(Wp, sidx, log2s, mx.diagonal(Hp), offsets=offsets)
     after_screen = hessian_objective(Wp, sidx, log2s, Hp)
-    sidx, sweeps = flip_refine(sidx, log2s, Wp, Hp, flips)
+    refine = flip_refine_metal if flip_impl == "metal" else flip_refine
+    sidx, sweeps = refine(sidx, log2s, Wp, Hp, flips)
     after = hessian_objective(Wp, sidx, log2s, Hp)
     packed, scales = pack_mxfp4(sidx, log2s)
     return packed, scales, (before, after_screen, after, sweeps)
@@ -102,6 +104,8 @@ def main():
                     help="transformer layers whose Hessians are resident at once")
     ap.add_argument("--hessian-cache", default="")
     ap.add_argument("--screen-offsets", default="-1,0,1")
+    ap.add_argument("--flip-impl", choices=("mlx", "metal"), default="mlx",
+                    help="metal uses the fused rgarcia-fx flip kernel (2-D layers only)")
     ap.add_argument("--limit-layers", type=int, default=0)
     args = ap.parse_args()
     offsets = tuple(int(x) for x in args.screen_offsets.split(","))
@@ -185,7 +189,7 @@ def main():
             W = mod.weight.astype(mx.float32)
             t = channel_scale(W, H, n_tokens, args.alpha)
             packed, scales, (before, after_screen, after, sweeps) = quantize_rotated(
-                W, H, t, args.flips, args.ridge, offsets)
+                W, H, t, args.flips, args.ridge, offsets, args.flip_impl)
             del W, H
             mx.clear_cache()
 
