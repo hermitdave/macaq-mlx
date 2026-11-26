@@ -116,6 +116,18 @@ out of scope; the RCO checkpoint quantizes those too (its config has affine
 (4.25 vs 4.63 bpw overall). Treat this as a deployment-relevant comparison,
 not a controlled study of the two quantizers on identical tensors.
 
+### Throughput (local mlx-lm, M3 Max, 988-token prompt, 256 tokens)
+
+| Model | prompt tok/s | decode tok/s | peak GB |
+|---|---:|---:|---:|
+| MACaQ Hadamard 4.25 | 665.2 | 50.0 | 9.04 |
+| RCO 4.63 (mtp4) | 738.9 | **64.2** | 6.38 |
+
+The quality advantage does not buy speed: RCO decodes ~28% faster and uses less
+memory. This matches the earlier Qwen3.5-9B finding that MACaQ is a fidelity
+play while RCO is the throughput choice. The Hadamard layer adds an online
+scale + Hadamard transform per linear, and its embeddings/lm_head stay BF16.
+
 ## Trade-offs
 
 - Quality: rotated codes lower the Hessian-weighted layer error; expect a
