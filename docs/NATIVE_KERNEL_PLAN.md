@@ -1,10 +1,9 @@
 # Native MACaQ kernel — working plan
 
-Status: **native build blocked locally; design validated only via runtime Metal
-kernel and measured slower. No PR.** The C++/Metal scaffold exists in
-`/tmp/omlxs/omlx-main/omlx/custom_kernels/macaq/` but cannot be compiled here
-(no `metal` compiler: `xcrun --find metal` fails, only Command Line Tools are
-installed). Do not open an upstream PR on the current evidence.
+Status: **native kernel built and executed locally; numerically correct but
+slower than stock. No PR.** The C++/Metal package lives in
+`/tmp/omlxs/omlx-main/omlx/custom_kernels/macaq/` and is NOT installed into the
+app bundle. Do not open an upstream PR on the current evidence.
 
 ## Decision (agreed)
 
@@ -43,33 +42,46 @@ Route A / stock path. No checkpoint may require the native kernel to load.
 
 ## What actually happened (this session)
 
-1. Wrote this plan and scaffolded a native package in the local checkout:
+1. Scaffolded the native package in the local checkout:
    `omlx/custom_kernels/macaq/{__init__.py,fast.py,csrc/{macaq.h,macaq.cpp,
-   macaq.metal,bindings.cpp}}` plus `setup_macaq.py`, using oQh's
+   macaq.metal,bindings.cpp}}` plus `setup_macaq.py`, following oQh's
    MetalExtension pattern and Huawei CSL's tiled decode design.
-2. Build attempt with the bundled CPython 3.11 failed: CMake could not find
-   Python development headers; overriding `Python_EXECUTABLE` to Homebrew
-   Python 3.11 fixed that, then the build failed at `xcrun: unable to find
-   utility "metal"` — no Metal compiler on this machine. The `.so`/`.metallib`
-   were never produced, so **no native kernel was executed**.
-3. Validated the same design through `mx.fast.metal_kernel` instead:
-   - `simd_shuffle_xor` is a no-op in runtime kernels, so the simd version
-     could not be exercised.
-   - Portable threadgroup-memory butterfly version was numerically correct
-     (rel 0.003–0.004) but slower: at D=N=4096, M=1 it took **0.67–1.42 ms vs
-     0.40–0.43 ms stock (0.30–0.60×)**. R=4/R=8 multi-row variants were worse
-     (0.15–0.27×).
-4. Conclusion: no evidence of a win. The uncompiled native version could be
-   faster because it can use real simd shuffles, but that is speculation until
-   built on a machine with Xcode's Metal toolchain. Keep the scaffold as a
-   starting point; do not PR.
+2. Build prerequisites resolved: Xcode was installed but not selected; using
+   `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, downloading the
+   Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`), overriding
+   `Python_EXECUTABLE` to Homebrew Python 3.11 and installing `nanobind==3.1.0`
+   got a real `_ext.cpython-311-darwin.so` and `omlx_macaq_kernels.metallib`.
+   Several C++ bugs were fixed (missing `mlx/utils.h`, `astype` as a free
+   function, scale shape check `*4` → `/4`, kernel-name mismatch, and a
+   threadgroup reduction race where 32 lanes wrote the same `red` slot).
+3. Correctness gate passed with the app-bundled CPython 3.11: relative error
+   **0.003–0.004** vs `hadamard + quantized_matmul` for M=1/4 and K/N shapes
+   256/8, 256/64, 512/128, 4096/64, and for the D=N=4096 sweep up to M=64.
+4. Microbenchmark gate **failed**. At D=N=4096:
+
+   | M | Stock | Native (4 simdgroups) | Speedup |
+   |---:|---:|---:|---:|
+   | 1 | 0.423 ms | 0.610 ms | **0.69×** |
+   | 2 | 0.247 ms | 1.052 ms | 0.23× |
+   | 4 | 0.388 ms | 0.945 ms | 0.41× |
+   | 8 | 0.316 ms | 1.173 ms | 0.27× |
+   | 16 | 0.491 ms | 1.982 ms | 0.25× |
+   | 64 | 0.554 ms | 6.827 ms | 0.08× |
+
+   An 8-simdgroup variant was also tried and was worse at M=1 (0.691 ms).
+   Root cause: one threadgroup per output row recomputes the Hadamard rotation
+   for every output row, while the stock path computes it once and reuses it
+   across all N rows. The K-group parallelism does not repay that lost reuse.
+5. Conclusion: correct but not competitive. No end-to-end oMLX A/B was run
+   because the microbenchmark gate failed. No PR.
 
 ## Re-open criteria
 
-- Build on a machine with `metal` available (install Xcode or point `xcrun` at
-  a toolchain that ships `metal`), then rerun gates 1–5 above.
-- If the native simd version still loses at M=1, stop; the kernel is not worth
-  an upstream PR.
+- Redesign for **activation reuse**: one threadgroup should handle multiple
+  output rows per rotated activation tile (oQh's 2 simdgroups × 4 output rows
+  pattern), or keep the rotation as a separate producer and fuse only the
+  MXFP4 GEMV, before retrying gates 2–4.
+- Do not re-run the same one-output-row-per-threadgroup design.
 
 ## Validation gates (all before PR)
 
