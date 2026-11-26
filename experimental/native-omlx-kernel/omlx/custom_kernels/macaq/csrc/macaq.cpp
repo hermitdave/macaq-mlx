@@ -58,7 +58,7 @@ class MacaqQmv : public Primitive {
     const int N = static_cast<int>(w.shape(0));
     const int M = static_cast<int>(x.size() / K);
     const std::string name =
-        "macaq_qmv_" + type_str(x.dtype()) + "_r" + std::to_string(r_);
+        "macaq_qmv_reuse_k4_" + type_str(x.dtype()) + "_r" + std::to_string(r_);
 
     auto& enc = metal::get_command_encoder(s);
     enc.set_compute_pipeline_state(get_kernel(d, name));
@@ -72,7 +72,7 @@ class MacaqQmv : public Primitive {
     enc.set_bytes(N, c++);
     enc.set_bytes(M, c++);
     enc.dispatch_threadgroups(
-        MTL::Size(N, (M + r_ - 1) / r_, 1), MTL::Size(32, 4, 1));
+        MTL::Size((M + r_ - 1) / r_, N / 4, 1), MTL::Size(32, 4, 1));
   }
 
   bool is_equivalent(const Primitive& other) const override {

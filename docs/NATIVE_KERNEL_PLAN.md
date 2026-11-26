@@ -1,9 +1,9 @@
 # Native MACaQ kernel — working plan
 
-Status: **native kernel built and executed locally; numerically correct but
-slower than stock. No PR.** The C++/Metal package lives in
-`/tmp/omlxs/omlx-main/omlx/custom_kernels/macaq/` and is NOT installed into the
-app bundle. Do not open an upstream PR on the current evidence.
+Status: **two native kernel tilings built and executed locally; both numerically
+correct, both slower than stock. Stopped — no PR.** The C++/Metal package lives
+in `experimental/native-omlx-kernel/` and is NOT installed into the app bundle.
+Do not open an upstream PR on the current evidence.
 
 ## Decision (agreed)
 
@@ -75,13 +75,35 @@ Route A / stock path. No checkpoint may require the native kernel to load.
 5. Conclusion: correct but not competitive. No end-to-end oMLX A/B was run
    because the microbenchmark gate failed. No PR.
 
+## Second attempt: activation reuse (this session)
+
+Implemented two further tilings in the native package:
+
+- **v2** (`macaq_qmv_reuse`): 8 output rows per threadgroup, 2 simdgroups,
+  serial K loop; rotate once per activation row and reuse across 8 rows.
+  Correct (rel 0.003–0.004), but 0.43× at M=1 (0.551 ms vs 0.237 ms stock).
+- **v3** (`macaq_qmv_reuse_k4`): 4 output rows per threadgroup, 4 simdgroups
+  partition K (G/4 iterations), activation reused across 4 rows, one
+  threadgroup reduction at the end. Fixed a `simd_sum` bug where only lane 0
+  participated. Correct (rel 0.003–0.004), but still 0.77× at M=1
+  (0.486 ms vs 0.372 ms stock) and 0.42–0.52× for M=2–8.
+
+Both failed the ≥10% decode-win gate, so no end-to-end oMLX A/B was run and no
+PR was opened. The stored experimental source is the v3 variant.
+
+Conclusion: activation reuse closes the 4× redundant-rotation gap but the
+kernel remains slower than MLX's tuned `quantized_matmul` at every tested
+decode size. Further GEMM kernel work would require a format or precision
+change (W4A4 + `mx.qqmm`) or an oQh-format rewrite, neither of which is in
+scope for this checkpoint.
+
 ## Re-open criteria
 
-- Redesign for **activation reuse**: one threadgroup should handle multiple
-  output rows per rotated activation tile (oQh's 2 simdgroups × 4 output rows
-  pattern), or keep the rotation as a separate producer and fuse only the
-  MXFP4 GEMV, before retrying gates 2–4.
-- Do not re-run the same one-output-row-per-threadgroup design.
+- Activation reuse has now been tried (v2 and v3) and did not close the gap.
+  Do not repeat it.
+- Re-open only for a materially different contract: W4A4 with `mx.qqmm` and a
+  new quality-validated checkpoint, or an oQh-format model that can use oMLX's
+  native kernels. Neither is part of the current rotated W4A16 checkpoint.
 
 ## Validation gates (all before PR)
 
