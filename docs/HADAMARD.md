@@ -1,0 +1,100 @@
+# 32-block Hadamard MACaQ (W4A16) on MLX
+
+This is an experimental extension of `macaq-mlx`. Unlike the default refiner,
+it rotates both the weight and the activation before quantization:
+
+```
+y = ((x * t) B) @ ((W / t) B)^T
+```
+
+`t` is a per-input-channel D1 scale and `B` is the orthonormal Walsh-Hadamard
+transform applied to independent 32-element blocks (the MXFP4 group size).
+Only `W' = (W / t) B` is stored as MXFP4; `t` is stored in bf16 and `B` is
+applied online by `macaq_model.py`.
+
+## Why
+
+On Apple Silicon there is no FP4 tensor core, so full W4A4 adds error without
+a speedup. Rotating the weight spreads outlier channels across MXFP4 groups;
+the third-party MACaQ W4A16 write-up reports removing the rotation costs
+11-15% KLD on WikiText-2 and 13-20% on C4, more than removing the D1 scale.
+
+## Build
+
+```bash
+python macaq_hadamard.py \
+  --bf16 /path/to/Qwen3.5-9B-BF16-text \
+  --output /path/to/Qwen3.5-9B-MLX-MACaQ-Hadamard-4.25bpw \
+  --calib-tokens 65536 --seq-len 512 --batch-size 8 \
+  --flips 256 --alpha 1.0 --group-size 2 \
+  --hessian-cache /path/to/hess_cache
+```
+
+The script starts from BF16 weights (it does **not** refine existing MXFP4
+codes), captures per-linear Hessians with module wrappers, rotates the
+Hessian analytically (`H' = B D H D B`), then runs the existing exponent
+screen and Flip-Refinement in the rotated basis.
+
+## Loading
+
+The checkpoint is **not** a plain MXFP4 model. It carries
+`"model_file": "macaq_model.py"` and a `macaq` section in `config.json`, and
+requires `trust_remote_code=True`:
+
+```bash
+mlx_lm.generate --model <out> --trust-remote-code --prompt "..."
+python eval_ppl.py --model <out>
+```
+
+Loading without the shim either refuses or silently produces garbage; the
+config marker makes plain loaders fail loudly.
+
+### oMLX
+
+Symlink the output into a `model_dirs` directory, then add a per-model entry:
+
+```json
+"Qwen3.5-9B-MLX-MACaQ-Hadamard-4.25bpw": {
+  "trust_remote_code": true,
+  "model_type_override": "llm",
+  "mtp_enabled": false,
+  "ttl_seconds": 3600,
+  "enable_thinking": false
+}
+```
+
+`model_type_override: "llm"` matters: Qwen3.5 checkpoints otherwise route to
+the VLM engine, where `model_file` is not applied. Reload the registry with
+`POST /admin/api/reload`, then load the model via
+`POST /admin/api/models/<id>/load`.
+
+## Validation (Qwen3.5-9B-text, 2026-11-26)
+
+Built with `--calib-tokens 65536 --seq-len 512 --batch-size 8 --flips 256
+--alpha 1.0 --ridge 1.0 --group-size 2`: 248 linears across 32 layers,
+rotated Hessian objective 1.268e9 -> 7.935e8 (37.4% reduction), 4486 s wall
+time. Output 7.2 GB.
+
+| Check | Result |
+|---|---|
+| WikiText-2 PPL, 32×512 tokens | 8.7089 ± 0.1829 |
+| BF16 teacher, same eval | 8.5607 ± 0.1799 (+1.73% for the quant) |
+| `mlx_lm.generate --trust-remote-code` | coherent, 52.6 tok/s, 7.88 GB peak |
+| oMLX load (model_type_override=llm) | `BatchedEngine loaded`, 7.44 GB actual |
+| oMLX chat completions | coherent answers, 41–49 tok/s |
+
+No same-recipe unrotated MACaQ checkpoint was rebuilt for this session, so the
+quality comparison against the old quant is indirect: the per-layer objective
+and the third-party ablation above.
+
+## Trade-offs
+
+- Quality: rotated codes lower the Hessian-weighted layer error; expect a
+  KLD improvement over the unrotated MACaQ quant, not a size change.
+- Memory: weights stay at 4.25 bpw; each rotated linear adds a bf16 `t`
+  vector (2 bytes per input channel).
+- Speed: the online scale + Hadamard is extra work per linear. No FP4 matmul
+  benefit on Apple GPUs, so decode is slower than the unrotated weight-only
+  quant.
+- Portability: oQh (oMLX's own rotated format) cannot load these checkpoints;
+  different codebook and block size.

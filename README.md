@@ -150,6 +150,16 @@ budget applies per chunk.
 `--hessian-cache` stores per-layer Hessians so hyper-parameter sweeps reuse them
 (the 200K cache is ~8 GB; 1M is ~22 GB).
 
+### Experimental: 32-block Hadamard rotation
+
+`macaq_hadamard.py` is a separate path that starts from BF16 weights and
+quantizes `(W / t) B` in the rotated basis, with B an orthonormal 32-block
+Walsh-Hadamard transform applied to activations online. It needs a loader shim
+(`macaq_model.py`, shipped in the checkpoint) and `trust_remote_code=True`,
+including in oMLX. See [docs/HADAMARD.md](docs/HADAMARD.md). This is not a
+drop-in replacement for the weight-only refiner: the checkpoints are not plain
+MXFP4, and decode is slower, but the rotated codes have lower layer error.
+
 ## How it works
 
 For each quantized linear layer:
