@@ -156,6 +156,11 @@ published checkpoint: unit/layer tests pass and PPL is identical (8.7089 on
 32×512), but full-model decode improved only 50.0 → 51.2 tok/s — within noise.
 See `docs/FUSED_KERNEL_PLAN.md` for the cross-session plan and measurements.
 
+A full fused GEMV (`fused="gemm"`) was also implemented and is numerically
+correct, but its first version is 4–8× slower than Route A + stock GEMM
+(7.8 tok/s end-to-end). It is research-only and not enabled anywhere; the plan
+records what a competitive version would need.
+
 ## Trade-offs
 
 - Quality: rotated codes lower the Hessian-weighted layer error; expect a

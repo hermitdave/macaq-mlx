@@ -1,8 +1,9 @@
 # Fused Hadamard kernel — working plan (Route A selected)
 
-Status: **Route A implemented and validated; opt-in, not enabled on the
-published checkpoint.** On branch `feat/hadamard`. This file is the cross-session
-handoff; update it as each step lands.
+Status: **Route A implemented; Route B implemented but measured slower and
+rejected for deployment.** On branch `feat/hadamard`. This file is the
+cross-session handoff; update it as each step lands. Kept as research code with
+`config["macaq"]["fused"] = "gemm"`; no checkpoint enables it.
 
 ## Decision
 
@@ -64,13 +65,24 @@ checkpoints are unchanged). Weight format and `FORMAT_VERSION` stay the same.
       on the HF repo (shards byte-identical, Xet dedups). If materially different
       artifact, publish a new variant and link from the existing card.
 
-## Deferred (Route B)
+## Route B result (negative)
 
-Full fused GEMV/GEMM with in-register E2M1 decode and E8M0 exponent. Likely needs
-M-based dispatch (fused GEMV for M<=8, Route A + stock GEMM for prefill), mirroring
-oMLX `oqh` (`qmv` decode vs `quantized_matmul` prefill). Risk: Python-defined
-kernel unlikely to beat MLX steel GEMM at large M; `header` may not expose MLX's
-internal `quantized_utils.h`. Estimate 1–2 weeks.
+Implemented `macaq_rotate_mxfp4_gemv`: one threadgroup per (output row,
+activation row), 32 lanes, in-register E2M1 decode + E8M0 exponent, fp32
+accumulate, threadgroup reduction, bf16 store. Numerically correct: relative
+error 0.003–0.004 vs Route A + stock GEMM on M=1..4 (`tests/test_fused_gemv.py`).
+Two bugs found and fixed during development: `half` is a reserved Metal type;
+`grid` is total threads, so x must be `N*32` to get N threadgroups.
+
+Performance at D=N=4096, K groups=128: 1.45 ms at M=1 vs 0.385 ms stock
+(0.27×); 2.68 ms at M=8 vs 0.335 ms (0.12×). Full model with `fused="gemm"`:
+**7.8 tok/s** vs ~50 tok/s stock. Cause: one threadgroup serialises 128 groups
+with 5 barriers each; no parallelism across K. Not deployed.
+
+To make Route B competitive it needs oQh-style tiling: multiple simdgroups per
+threadgroup, R activation rows sharing a weight load, and K groups parallelised
+rather than looped — a C++ extension in `omlx/custom_kernels/` is the better
+home for that, which implies an upstream PR.
 
 ## Reference numbers to beat
 
