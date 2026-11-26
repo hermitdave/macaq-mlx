@@ -128,6 +128,24 @@ memory. This matches the earlier Qwen3.5-9B finding that MACaQ is a fidelity
 play while RCO is the throughput choice. The Hadamard layer adds an online
 scale + Hadamard transform per linear, and its embeddings/lm_head stay BF16.
 
+### Grafted 4-bit MTP head — negative result
+
+Grafted the 31 `mtp.*` tensors (0.137 GB) and 8 affine-4 MTP quantization
+entries from RCO 4.63 into a copy of the Hadamard checkpoint
+(`Qwen3.5-9B-MLX-MACaQ-Hadamard-4.25bpw-mtp4`). oMLX loads it and selects
+`Lightning MTP (model_type=qwen3_5, active)`, but drafting is rejected:
+
+| config | tok/s | vs off | acceptance |
+|---|---:|---:|---|
+| MTP off | 47.9 | 1.00× | — |
+| depth 1 | 38.3 | 0.80× | 17/237 = **7.2%** (d2 0/17) |
+| depth 3 | 25.0 | 0.52× | ~6.7% (d2 0/17, d3 0/0) |
+
+This reproduces the earlier MACaQ/MTP finding (3.3–3.4% acceptance, 0.64×):
+the rotated backbone's hidden states do not match a head trained against a
+different quantization basis. `mtp_enabled` stays false; the grafted checkpoint
+is kept locally as the documented negative result and is unloaded.
+
 ## Trade-offs
 
 - Quality: rotated codes lower the Hessian-weighted layer error; expect a
