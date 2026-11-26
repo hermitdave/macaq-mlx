@@ -85,7 +85,15 @@ time. Output 7.2 GB.
 
 No same-recipe unrotated MACaQ checkpoint was rebuilt for this session, so the
 quality comparison against the old quant is indirect: the per-layer objective
-and the third-party ablation above.
+and the third-party ablation above. A historical session
+(@session:helix/local-e09884e071ccfc2b94dfb73706b58a2845a412a4c6b6f3ef1d097697d80cd2b8)
+recorded the unrotated 4.25 bpw MACaQ-Hessian build on this model: PPL 10.5345
+vs BF16 10.2656 (+2.62%), KL 0.0388, top-1 88.82%, with 200k calibration
+tokens. That used a different harness (`eval_quality_table`, 8×256 positions)
+from the 32×512 `eval_ppl.py` run above, so the absolute PPLs are not
+comparable; the relative gap to BF16 (+1.73% rotated vs +2.62% unrotated) is
+only indicative. The old checkpoint has since been deleted locally, so a
+same-harness rerun would require rebuilding it.
 
 ## Trade-offs
 
