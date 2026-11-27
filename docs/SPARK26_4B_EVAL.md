@@ -18,18 +18,21 @@ the 4B checkpoint.
 
 ## Zero-shot (`model-eval`, 400 items/task, Wilson 95% CI)
 
-| Task | BF16 | MACaQ Hadamard | MACaQ WO | RCO |
-| :--- | ---: | ---: | ---: | ---: |
-| ARC-Challenge | 0.3475 [0.303,0.395] | **0.3550** [0.310,0.403] | 0.3025 [0.260,0.349] | 0.3000 [0.257,0.347] |
-| ARC-Easy | 0.5775 [0.529,0.625] | **0.5775** [0.529,0.625] | 0.5175 [0.469,0.566] | 0.5225 [0.474,0.571] |
-| HellaSwag | 0.4000 [0.353,0.449] | 0.3800 [0.334,0.429] | **0.4000** [0.353,0.449] | 0.3800 [0.334,0.429] |
-| WinoGrande | 0.5350 [0.486,0.583] | **0.5575** [0.509,0.605] | 0.5200 [0.471,0.569] | 0.5175 [0.469,0.566] |
-| MMLU | 0.3225 [0.279,0.370] | 0.3050 [0.262,0.352] | 0.2825 [0.241,0.329] | 0.2700 [0.229,0.316] |
+| Task | BF16 | MACaQ Hadamard | Δ vs BF16 | p (McNemar) | MACaQ WO | RCO |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ARC-Challenge | 0.3475 [0.303,0.395] | **0.3550** [0.310,0.403] | +0.0075 | 0.7359 | 0.3025 [0.260,0.349] | 0.3000 [0.257,0.347] |
+| ARC-Easy | 0.5775 [0.529,0.625] | **0.5775** [0.529,0.625] | 0.0000 | 1.0000 | 0.5175 [0.469,0.566] | 0.5225 [0.474,0.571] |
+| HellaSwag | 0.4000 [0.353,0.449] | 0.3800 [0.334,0.429] | −0.0200 | 0.0386 | **0.4000** [0.353,0.449] | 0.3800 [0.334,0.429] |
+| WinoGrande | 0.5350 [0.486,0.583] | **0.5575** [0.509,0.605] | +0.0225 | 0.3425 | 0.5200 [0.471,0.569] | 0.5175 [0.469,0.566] |
+| MMLU | 0.3225 [0.279,0.370] | 0.3050 [0.262,0.352] | −0.0175 | 0.3240 | 0.2825 [0.241,0.329] | 0.2700 [0.229,0.316] |
 
-Paired McNemar:
+**Statistically lossless verdict:** yes under Bonferroni-corrected exact McNemar
+across five tasks (α = 0.01). No task shows a significant degradation versus
+BF16. HellaSwag is nominally p = 0.0386 but does not survive correction; under
+an uncorrected α = 0.05 rule it would fail. Δ is Hadamard minus BF16 on the
+same items.
 
-- Hadamard vs BF16: no significant loss on any task after Bonferroni correction;
-  only HellaSwag was nominally p = 0.0386.
+Other paired McNemar comparisons:
 - Hadamard vs weight-only: ARC-Challenge p = 0.0046 and ARC-Easy p = 0.0079
   favour Hadamard (both survive correction at 0.01).
 - Hadamard vs RCO: ARC-Challenge p = 0.0038 and ARC-Easy p = 0.0103 favour
