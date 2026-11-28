@@ -23,7 +23,10 @@ import mlx.nn as nn
 import numpy as np
 from datasets import load_dataset
 from mlx.utils import tree_flatten
-from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+try:
+    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+except ImportError:  # newer mlx-lm trees moved MoE layers
+    from mlx_lm.layers.moe import QuantizedSwitchLinear
 from mlx_lm.utils import load, load_config, save
 
 BLOCK = 32
