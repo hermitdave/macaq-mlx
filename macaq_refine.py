@@ -23,7 +23,10 @@ import mlx.nn as nn
 import numpy as np
 from datasets import load_dataset
 from mlx.utils import tree_flatten
-from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+try:
+    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+except ImportError:  # newer mlx-lm trees moved MoE layers
+    from mlx_lm.layers.moe import QuantizedSwitchLinear
 from mlx_lm.utils import load, load_config, save
 
 BLOCK = 32
@@ -475,8 +478,15 @@ def main():
     ap.add_argument("--limit-layers", type=int, default=0)
     ap.add_argument("--objective", choices=["hessian", "mse"], default="hessian",
                     help="refinement metric: Hessian output error (default) or plain weight MSE")
+    ap.add_argument("--flip-impl", choices=["mlx", "metal"], default="mlx",
+                    help="fused Metal flip kernel for 2-D dense layers only")
     args = ap.parse_args()
     screen_offsets = tuple(int(x) for x in args.screen_offsets.split(","))
+    if args.flip_impl == "metal":
+        from macaq_flip_kernel import flip_refine_metal
+        dense_flip_refine = flip_refine_metal
+    else:
+        dense_flip_refine = flip_refine
 
     mx.set_default_device(mx.gpu)
     t0 = time.time()
@@ -610,7 +620,7 @@ def main():
                     before = hessian_objective(W, sidx, log2s, H)
                     sidx, log2s = screen_exponents(W, sidx, log2s, mx.diagonal(H), offsets=screen_offsets)
                     after_screen = hessian_objective(W, sidx, log2s, H)
-                    sidx, sweeps = flip_refine(sidx, log2s, W, H, args.flips)
+                    sidx, sweeps = dense_flip_refine(sidx, log2s, W, H, args.flips)
                     after_flip = hessian_objective(W, sidx, log2s, H)
                 packed, scales = pack_mxfp4(sidx, log2s)
                 q.weight = packed

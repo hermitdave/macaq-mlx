@@ -150,6 +150,40 @@ budget applies per chunk.
 `--hessian-cache` stores per-layer Hessians so hyper-parameter sweeps reuse them
 (the 200K cache is ~8 GB; 1M is ~22 GB).
 
+### Experimental: 32-block Hadamard rotation
+
+`macaq_hadamard.py` is a separate path that starts from BF16 weights and
+quantizes `(W / t) B` in the rotated basis, with B an orthonormal 32-block
+Walsh-Hadamard transform applied to activations online. It needs a loader shim
+(`macaq_model.py`, shipped in the checkpoint) and `trust_remote_code=True`,
+including in oMLX. See [docs/HADAMARD.md](docs/HADAMARD.md). This is not a
+drop-in replacement for the weight-only refiner: the checkpoints are not plain
+MXFP4, and decode is slower, but the rotated codes have lower layer error.
+
+#### Qwen3.5-9B results
+
+A full Hadamard W4A16 checkpoint was produced from `Qwen3.5-9B-BF16-text` at
+4.25 bpw (6.92 bpw all-in). It was validated with `mlx_lm.generate` and in
+oMLX using `trust_remote_code=True`.
+
+| Checkpoint | PPL | Prompt TPS | Decode TPS | Peak memory |
+| :--- | ---: | ---: | ---: | ---: |
+| MACaQ Hadamard 4.25 (stock transform) | 8.7089 ± 0.1829 | 665.2 | 50.0 | 9.04 GB |
+| MACaQ Hadamard 4.25 (`fused="rotate"`) | 8.7089 (unchanged) | — | 51.2 | — |
+| RCO 4.63 (local comparison) | — | 738.9 | 64.2 | 6.38 GB |
+
+Measured on M3 Max (64 GB), 988-token prompt, 256 generated tokens. The fused
+kernel is quality-neutral: the KL/PPL/top-1 benefit comes from the rotated
+quantization itself, not the kernel. The full-model 50.0 → 51.2 tok/s change is
+within noise, so the published checkpoint keeps `fused: "none"`, with the
+opt-in `rotate` path retained.
+
+A grafted 4-bit RCO MTP head was tested and rejected: acceptance was only
+3–7%, with roughly 0.64× decode speed. `mtp_enabled` remains false. Further
+fused-GEMM experiments are recorded in [docs/FUSED_KERNEL_PLAN.md](docs/FUSED_KERNEL_PLAN.md)
+and [docs/NATIVE_KERNEL_PLAN.md](docs/NATIVE_KERNEL_PLAN.md); none improved on
+stock decode, so there is no upstream kernel PR from this work.
+
 ## How it works
 
 For each quantized linear layer:
